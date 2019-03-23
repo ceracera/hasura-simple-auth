@@ -13,7 +13,7 @@ const graphql = new GraphQLClient(config.ENDPOINT, {
 
 const LOGIN = `
   query user($email: String) {
-    user(where:{email: {_eq: $email}}) { id password }
+    user(where:{email: {_eq: $email}}) { id password role {name} account_id }
   }
 `
 
@@ -23,8 +23,14 @@ const SIGNUP = `
   }
 `
 
+const SETPASS = `
+  mutation setpass($email: String, $password: String) {
+    update_user(_set: { password: $password }, where: { email: { _eq: $email }, _or: [{ password: { _is_null: true }}, { password: { _eq: "" }}]}) { returning { id role { name } account_id }}
+  }
+`
+
 const ME = `
-  query me($id: uuid) {
+  query me($id: ID) {
     user(where:{id: {_eq: $id}}) { email }
   }
 `
@@ -35,13 +41,18 @@ const typeDefs = gql`
   }
   type Mutation {
     signup(email: String, password: String): AuthPayload!
+    setpass(email: String, password: String): AuthPayload!
     login(email: String, password: String): AuthPayload!
   }
   type AuthPayload {
-      token: String
+    token: String
   }
   type User {
     email: String
+    role: Role
+  }
+  type Role {
+    name: String
   }
 `;
 
@@ -73,7 +84,31 @@ const resolvers = {
         "https://hasura.io/jwt/claims": {
           "x-hasura-allowed-roles": ["user"],
           "x-hasura-default-role": "user",
-          "x-hasura-user-id": user.id
+          "x-hasura-role": user.role.name,
+          "x-hasura-user-id": user.id,
+          "x-hasura-account-id": user.account_id
+        }
+      }, config.JWT_SECRET)
+
+      return { token }
+    },
+    setpass: async (_, { email, password }) => {
+      const hashedPassword = await bcrypt.hash(password, 10)
+      const user = await graphql.request(SETPASS, { email, password: hashedPassword }).then(data => {
+        return data.update_user.returning[0]
+      })
+
+      console.log('user is: ', user);
+      const token = jwt.sign({
+        userId: user.id,
+        role: user.role.name,
+        accountId: user.account_id,
+        "https://hasura.io/jwt/claims": {
+          "x-hasura-allowed-roles": ["user"],
+          "x-hasura-default-role": "user",
+          "x-hasura-role": user.role.name,
+          "x-hasura-user-id": user.id,
+          "x-hasura-account-id": user.account_id
         }
       }, config.JWT_SECRET)
 
@@ -84,6 +119,7 @@ const resolvers = {
         return data.user[0]
       })
 
+      console.log('user is: ', user);
       if (!user) throw new Error('No such user found.')
 
       const valid = await bcrypt.compare(password, user.password)
@@ -91,10 +127,14 @@ const resolvers = {
       if (valid) {
         const token = jwt.sign({
           userId: user.id,
+          role: user.role.name,
+          accountId: user.account_id,
           "https://hasura.io/jwt/claims": {
-            "x-hasura-allowed-roles": ["user"],
-            "x-hasura-default-role": "user",
-            "x-hasura-user-id": user.id
+            "x-hasura-allowed-roles": [user.role.name],
+            "x-hasura-default-role": user.role.name,
+            "x-hasura-role": user.role.name,
+            "x-hasura-user-id": user.id,
+            "x-hasura-account-id": user.account_id
           }
         }, config.JWT_SECRET)
 
